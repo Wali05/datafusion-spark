@@ -125,6 +125,70 @@ statement ok
 DROP TABLE elt_rows;
 
 ########################################
+# Binary inputs: Spark returns BINARY when every value argument is binary
+# (EltTypeCoercion in TypeCoercionHelper.scala). The eltOutputAsString flag
+# (default false) is not implemented yet, tracked by
+# https://github.com/apache/datafusion-spark/issues/92
+########################################
+
+# All value arguments binary -> result is Binary (hex-rendered)
+query ?T
+SELECT elt(1::int, arrow_cast('scala', 'Binary'), arrow_cast('java', 'Binary')), arrow_typeof(elt(1::int, arrow_cast('scala', 'Binary'), arrow_cast('java', 'Binary')));
+----
+7363616c61 Binary
+
+# All value arguments binary, binary literals, pick the second
+query ?
+SELECT elt(2::int, x'636166', x'c3a9');
+----
+c3a9
+
+# Widest binary type wins: LargeBinary
+query ?T
+SELECT elt(1::int, arrow_cast('x', 'LargeBinary'), arrow_cast('y', 'LargeBinary')), arrow_typeof(elt(1::int, arrow_cast('x', 'LargeBinary'), arrow_cast('y', 'LargeBinary')));
+----
+78 LargeBinary
+
+# Widest binary type wins: BinaryView
+query ?T
+SELECT elt(1::int, arrow_cast('x', 'BinaryView'), arrow_cast('y', 'BinaryView')), arrow_typeof(elt(1::int, arrow_cast('x', 'BinaryView'), arrow_cast('y', 'BinaryView')));
+----
+78 BinaryView
+
+# Mixed binary + string -> result falls back to string (Utf8)
+query TT
+SELECT elt(1::int, arrow_cast('hello', 'Binary'), 'world'), arrow_typeof(elt(1::int, arrow_cast('hello', 'Binary'), 'world'));
+----
+hello Utf8
+
+# Binary with a NULL-typed argument -> string, because NullType is not binary
+# (Spark: children.tail.forall(_ == BinaryType) is false, so the output is a string)
+query TT
+SELECT elt(1::int, arrow_cast('hello', 'Binary'), NULL), arrow_typeof(elt(1::int, arrow_cast('hello', 'Binary'), NULL));
+----
+hello Utf8
+
+# Picking a NULL binary value returns NULL but keeps the Binary type
+query ?T
+SELECT elt(2::int, arrow_cast('a', 'Binary'), arrow_cast(NULL, 'Binary')), arrow_typeof(elt(2::int, arrow_cast('a', 'Binary'), arrow_cast(NULL, 'Binary')));
+----
+NULL Binary
+
+# Column-based binary inputs: valid, picked, and out-of-range (index 3 -> NULL)
+query ?T
+SELECT elt(idx, a, b), arrow_typeof(elt(idx, a, b))
+FROM (VALUES
+    (1, arrow_cast('a1', 'Binary'), arrow_cast('b1', 'Binary')),
+    (2, arrow_cast('a2', 'Binary'), arrow_cast('b2', 'Binary')),
+    (3, arrow_cast('a3', 'Binary'), arrow_cast('b3', 'Binary'))
+) AS t(idx, a, b)
+ORDER BY idx;
+----
+6131 Binary
+6232 Binary
+NULL Binary
+
+########################################
 # ANSI mode = true: invalid indices raise ArrayIndexOutOfBoundsException
 ########################################
 
@@ -180,6 +244,13 @@ statement error
 SELECT elt(100::int, 'a', 'b', 'c');
 ----
 DataFusion error: Execution error: The index 100 is out of bounds. The array has 3 elements.
+
+
+# Out-of-range index with all-binary values still errors in ANSI mode
+statement error
+SELECT elt(3::int, arrow_cast('a', 'Binary'), arrow_cast('b', 'Binary'));
+----
+DataFusion error: Execution error: The index 3 is out of bounds. The array has 2 elements.
 
 
 # Vectorized: a batch that contains any invalid index errors in ANSI mode
